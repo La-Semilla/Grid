@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MLRws">
+<meta name="theme-color" content="#1e2a36">
+<link rel="manifest" href="manifest.json">
+<title>MLRws Grid</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body {
+    background: #1e2a36;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    /* fill including safe areas (notch / home bar) */
+    min-height: 100vh;
+    min-height: -webkit-fill-available;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+    font-family: monospace;
+    color: #c8d4de;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+
+  #grid-wrap {
+    position: relative;
+    width: 100%;
+    max-width: min(98vw, calc(98vh * 2));
+  }
+
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(16, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    gap: 3px;
+    width: 100%;
+    aspect-ratio: 2 / 1;
+    padding: 3px;
+    background: #384858;
+    border-radius: 8px;
+  }
+
+  .btn {
+    position: relative;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+  }
+  /* Visual button surface — scaled down inside the full touch target */
+  .btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 5px;
+    background: var(--c, #526c86);
+    transform: scale(0.72);
+    /* --bloom is set per-cell by JS; scale(0.72) also scales shadow radii,
+       so 30px/9px unscaled → ~22px/6px after transform ≈ 3× the margin gap width */
+    box-shadow: 0 3px 5px rgba(0,0,0,calc(0.5 * var(--sa, 1))),
+                0 1px 2px rgba(0,0,0,calc(0.3 * var(--sa, 1))),
+                inset 0 1px 0 rgba(255,255,255,0.14),
+                var(--bloom, 0 0 0 0 transparent);
+  }
+  .btn.pressed::before {
+    transform: scale(0.72) translateY(1px);
+    box-shadow: 0 1px 2px rgba(0,0,0,calc(0.4 * var(--sa, 1))),
+                inset 0 1px 3px rgba(0,0,0,0.5),
+                var(--bloom, 0 0 0 0 transparent);
+  }
+
+</style>
+</head>
+<body>
+
+
+<div id="grid-wrap">
+  <div id="grid"></div>
+</div>
+
+<!-- web-serial-polyfill v1.0.15 (https://github.com/google/web-serial-polyfill), inlined -->
+<script>
+'use strict';
+var SerialPolyfillProtocol;
+(function (SerialPolyfillProtocol) {
+    SerialPolyfillProtocol[SerialPolyfillProtocol["UsbCdcAcm"] = 0] = "UsbCdcAcm";
+})(SerialPolyfillProtocol || (SerialPolyfillProtocol = {}));
+const kSetLineCoding = 0x20;
+const kSetControlLineState = 0x22;
+const kSendBreak = 0x23;
+const kDefaultBufferSize = 255;
+const kDefaultDataBits = 8;
+const kDefaultParity = 'none';
+const kDefaultStopBits = 1;
+const kAcceptableDataBits = [16, 8, 7, 6, 5];
+const kAcceptableStopBits = [1, 2];
+const kAcceptableParity = ['none', 'even', 'odd'];
+const kParityIndexMapping = ['none', 'odd', 'even'];
+const kStopBitsIndexMapping = [1, 1.5, 2];
+const kDefaultPolyfillOptions = {
+    protocol: SerialPolyfillProtocol.UsbCdcAcm,
+    usbControlInterfaceClass: 2,
+    usbTransferInterfaceClass: 10,
+};
+function findInterface(device, classCode) {
+    const configuration = device.configurations[0];
+    for (const iface of configuration.interfaces) {
+        const alternate = iface.alternates[0];
+        if (alternate.interfaceClass === classCode) {
+            return iface;
+        }
+    }
+    throw new TypeError(`Unable to find interface with class ${classCode}.`);
+}
+function findEndpoint(iface, direction) {
+    const alternate = iface.alternates[0];
+    for (const endpoint of alternate.endpoints) {
+        if (endpoint.direction == direction) {
+            return endpoint;
+        }
+    }
+    throw new TypeError(`Interface ${iface.interfaceNumber} does not have an ` +
+        `${direction} endpoint.`);
+}
+class UsbEndpointUnderlyingSource {
+    constructor(device, endpoint, onError) {
+        this.type = 'bytes';
+        this.device_ = device;
+        this.endpoint_ = endpoint;
+        this.onError_ = onError;
+    }
+    pull(controller) {
+        (async () => {
+            var _a;
+            let chunkSize;
+            if (controller.desiredSize) {
+                const d = controller.desiredSize / this.endpoint_.packetSize;
+                chunkSize = Math.ceil(d) * this.endpoint_.packetSize;
+            }
+            else {
+                chunkSize = this.endpoint_.packetSize;
+            }
+            try {
+                const result = await this.device_.transferIn(this.endpoint_.endpointNumber, chunkSize);
+                if (result.status != 'ok') {
+                    controller.error(`USB error: ${result.status}`);
+                    this.onError_();
+                }
+                if ((_a = result.data) === null || _a === void 0 ? void 0 : _a.buffer) {
+                    const chunk = new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength);
+                    controller.enqueue(chunk);
+                }
+            }
+            catch (error) {
+                controller.error(error.toString());
+                this.onError_();
+            }
+        })();
+    }
+}
+class UsbEndpointUnderlyingSink {
+    constructor(device, endpoint, onError) {
+        this.device_ = device;
+        this.endpoint_ = endpoint;
+        this.onError_ = onError;
+    }
+    async write(chunk, controller) {
+        try {
+            const result = await this.device_.transferOut(this.endpoint_.endpointNumber, chunk);
+            if (result.status != 'ok') {
+                controller.error(result.status);
+                this.onError_();
+            }
+        }
+        catch (error) {
+            controller.error(error.toString());
+            this.onError_();
+        }
+    }
+}
+class SerialPort {
+    constructor(device, polyfillOptions) {
+        this.polyfillOptions_ = Object.assign(Object.assign({}, kDefaultPolyfillOptions), polyfillOptions);
+        this.outputSignals_ = { dataTerminalReady: false, requestToSend: false, break: false };
+        this.device_ = device;
+        this.controlInterface_ = findInterface(this.device_, this.polyfillOptions_.usbControlInterfaceClass);
+        this.transferInterface_ = findInterface(this.device_, this.polyfillOptions_.usbTransferInterfaceClass);
+        this.inEndpoint_ = findEndpoint(this.transferInterface_, 'in');
+        this.outEndpoint_ = findEndpoint(this.transferInterface_, 'out');
+    }
+    get readable() {
+        var _a;
+        if (!this.readable_ && this.device_.opened) {
+            this.readable_ = new ReadableStream(new UsbEndpointUnderlyingSource(this.device_, this.inEndpoint_, () => { this.readable_ = null; }), {
+                highWaterMark: (_a = this.serialOptions_.bufferSize) !== null && _a !== void 0 ? _a : kDefaultBufferSize,
+            });
+        }
+        return this.readable_;
+    }
+    get writable() {
+        var _a;
+        if (!this.writable_ && this.device_.opened) {
+            this.writable_ = new WritableStream(new UsbEndpointUnderlyingSink(this.device_, this.outEndpoint_, () => { this.writable_ = null; }), new ByteLengthQueuingStrategy({
+                highWaterMark: (_a = this.serialOptions_.bufferSize) !== null && _a !== void 0 ? _a : kDefaultBufferSize,
+            }));
+        }
+        return this.writable_;
+    }
+    async open(options) {
+        this.serialOptions_ = options;
+        this.validateOptions();
+        try {
+            await this.device_.open();
+            if (this.device_.configuration === null) {
+                await this.device_.selectConfiguration(1);
+            }
+            await this.device_.claimInterface(this.controlInterface_.interfaceNumber);
+            if (this.controlInterface_ !== this.transferInterface_) {
+                await this.device_.claimInterface(this.transferInterface_.interfaceNumber);
+            }
+            await this.setLineCoding();
+            await this.setSignals({ dataTerminalReady: true });
+        }
+        catch (error) {
+            if (this.device_.opened) { await this.device_.close(); }
+            throw new Error('Error setting up device: ' + error.toString());
+        }
+    }
+    async close() {
+        const promises = [];
+        if (this.readable_) { promises.push(this.readable_.cancel()); }
+        if (this.writable_) { promises.push(this.writable_.abort()); }
+        await Promise.all(promises);
+        this.readable_ = null;
+        this.writable_ = null;
+        if (this.device_.opened) {
+            await this.setSignals({ dataTerminalReady: false, requestToSend: false });
+            await this.device_.close();
+        }
+    }
+    async forget() { return this.device_.forget(); }
+    getInfo() { return { usbVendorId: this.device_.vendorId, usbProductId: this.device_.productId }; }
+    reconfigure(options) {
+        this.serialOptions_ = Object.assign(Object.assign({}, this.serialOptions_), options);
+        this.validateOptions();
+        return this.setLineCoding();
+    }
+    async setSignals(signals) {
+        this.outputSignals_ = Object.assign(Object.assign({}, this.outputSignals_), signals);
+        if (signals.dataTerminalReady !== undefined || signals.requestToSend !== undefined) {
+            const value = (this.outputSignals_.dataTerminalReady ? 1 << 0 : 0) |
+                (this.outputSignals_.requestToSend ? 1 << 1 : 0);
+            await this.device_.controlTransferOut({
+                requestType: 'class', recipient: 'interface',
+                request: kSetControlLineState, value, index: this.controlInterface_.interfaceNumber,
+            });
+        }
+        if (signals.break !== undefined) {
+            const value = this.outputSignals_.break ? 0xFFFF : 0x0000;
+            await this.device_.controlTransferOut({
+                requestType: 'class', recipient: 'interface',
+                request: kSendBreak, value, index: this.controlInterface_.interfaceNumber,
+            });
+        }
+    }
+    validateOptions() {
+        if (!this.isValidBaudRate(this.serialOptions_.baudRate))
+            throw new RangeError('invalid Baud Rate ' + this.serialOptions_.baudRate);
+        if (!this.isValidDataBits(this.serialOptions_.dataBits))
+            throw new RangeError('invalid dataBits ' + this.serialOptions_.dataBits);
+        if (!this.isValidStopBits(this.serialOptions_.stopBits))
+            throw new RangeError('invalid stopBits ' + this.serialOptions_.stopBits);
+        if (!this.isValidParity(this.serialOptions_.parity))
+            throw new RangeError('invalid parity ' + this.serialOptions_.parity);
+    }
+    isValidBaudRate(baudRate) { return baudRate % 1 === 0; }
+    isValidDataBits(dataBits) { return typeof dataBits === 'undefined' || kAcceptableDataBits.includes(dataBits); }
+    isValidStopBits(stopBits) { return typeof stopBits === 'undefined' || kAcceptableStopBits.includes(stopBits); }
+    isValidParity(parity) { return typeof parity === 'undefined' || kAcceptableParity.includes(parity); }
+    async setLineCoding() {
+        var _a, _b, _c;
+        const buffer = new ArrayBuffer(7);
+        const view = new DataView(buffer);
+        view.setUint32(0, this.serialOptions_.baudRate, true);
+        view.setUint8(4, kStopBitsIndexMapping.indexOf((_a = this.serialOptions_.stopBits) !== null && _a !== void 0 ? _a : kDefaultStopBits));
+        view.setUint8(5, kParityIndexMapping.indexOf((_b = this.serialOptions_.parity) !== null && _b !== void 0 ? _b : kDefaultParity));
+        view.setUint8(6, (_c = this.serialOptions_.dataBits) !== null && _c !== void 0 ? _c : kDefaultDataBits);
+        const result = await this.device_.controlTransferOut({
+            requestType: 'class', recipient: 'interface',
+            request: kSetLineCoding, value: 0x00, index: this.controlInterface_.interfaceNumber,
+        }, buffer);
+        if (result.status != 'ok') throw new DOMException('NetworkError', 'Failed to set line coding.');
+    }
+}
+class Serial {
+    async requestPort(options, polyfillOptions) {
+        polyfillOptions = Object.assign(Object.assign({}, kDefaultPolyfillOptions), polyfillOptions);
+        const usbFilters = [];
+        if (options && options.filters) {
+            for (const filter of options.filters) {
+                const usbFilter = { classCode: polyfillOptions.usbControlInterfaceClass };
+                if (filter.usbVendorId !== undefined) usbFilter.vendorId = filter.usbVendorId;
+                if (filter.usbProductId !== undefined) usbFilter.productId = filter.usbProductId;
+                usbFilters.push(usbFilter);
+            }
+        }
+        if (usbFilters.length === 0) usbFilters.push({ classCode: polyfillOptions.usbControlInterfaceClass });
+        const device = await navigator.usb.requestDevice({ filters: usbFilters });
+        return new SerialPort(device, polyfillOptions);
+    }
+    async getPorts(polyfillOptions) {
+        polyfillOptions = Object.assign(Object.assign({}, kDefaultPolyfillOptions), polyfillOptions);
+        const devices = await navigator.usb.getDevices();
+        const ports = [];
+        devices.forEach((device) => {
+            try { ports.push(new SerialPort(device, polyfillOptions)); } catch (e) {}
+        });
+        return ports;
+    }
+}
+window.__webSerialPolyfill = new Serial();
+</script>
+
+<script>
+const COLS = 16;
+const ROWS = 8;
+
+// LED state: 0–15 per cell
+const leds = new Uint8Array(COLS * ROWS);
+// Physical press state (for border highlight)
+const pressed = new Uint8Array(COLS * ROWS);
+// Global intensity 0–15
+let globalIntensity = 15;
+
+// --- Build grid DOM ---
+const grid = document.getElementById('grid');
+const cells = [];
+for (let y = 0; y < ROWS; y++) {
+  for (let x = 0; x < COLS; x++) {
+    const el = document.createElement('div');
+    el.className = 'btn';
+    grid.appendChild(el);
+    cells.push(el);
+  }
+}
+
+function cellIndex(x, y) { return y * COLS + x; }
+
+// Warm incandescent color ramp matching the physical device.
+// Stops: [normalised brightness, [r, g, b]]
+// t=0.067 is exactly level 1/15 at full global intensity.
+const COLOR_STOPS = [
+  [0.000, [ 82, 108, 134]],  // off     — #526c86 (user-specified)
+  [0.067, [126, 130, 138]],  // level 1 — #7e828a (user-specified)
+  [0.200, [140, 134, 116]],  // warming — desaturated warm grey
+  [0.370, [158, 136,  85]],  // dim amber emerging
+  [0.560, [188, 154,  90]],  // warm gold
+  [0.760, [220, 194, 138]],  // warm cream
+  [1.000, [250, 242, 208]],  // full    — near-white with warm tint
+];
+
+// Scale each stop's brightness linearly from 0.5× (t=0) to 1.0× (t=1),
+// expanding the perceived range while preserving the hue progression.
+COLOR_STOPS.forEach(([t, c]) => {
+  const scale = 0.5 + 0.5 * t;
+  for (let i = 0; i < 3; i++) c[i] = Math.min(255, Math.round(c[i] * scale));
+});
+
+function ledColor(brightness) {
+  if (brightness <= 0) return COLOR_STOPS[0][1];
+  if (brightness >= 1) return COLOR_STOPS[COLOR_STOPS.length - 1][1];
+  for (let i = 0; i < COLOR_STOPS.length - 1; i++) {
+    const [t0, c0] = COLOR_STOPS[i];
+    const [t1, c1] = COLOR_STOPS[i + 1];
+    if (brightness <= t1) {
+      const t = (brightness - t0) / (t1 - t0);
+      return c0.map((v, j) => Math.round(v + t * (c1[j] - v)));
+    }
+  }
+  return COLOR_STOPS[COLOR_STOPS.length - 1][1];
+}
+
+function renderCell(x, y) {
+  const idx = cellIndex(x, y);
+  const brightness = (leds[idx] / 15) * (globalIntensity / 15);
+  const [r, g, b] = ledColor(brightness);
+  const el = cells[idx];
+  el.style.setProperty('--c', `rgb(${r},${g},${b})`);
+  el.style.setProperty('--sa', (1 - brightness).toFixed(2));
+  const bloomFactor = Math.max(0, (brightness - 0.6) / 0.4);
+  if (bloomFactor > 0) {
+    el.style.setProperty('--bloom', `0 0 30px 9px rgba(${r},${g},${b},${(bloomFactor * 0.75).toFixed(2)})`);
+  } else {
+    el.style.setProperty('--bloom', '0 0 0 0 transparent');
+  }
+  if (pressed[idx]) {
+    el.classList.add('pressed');
+  } else {
+    el.classList.remove('pressed');
+  }
+}
+
+function renderAll() {
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      renderCell(x, y);
+}
+
+// --- Serial backend ---
+// Native WebSerial on desktop (kernel owns CDC via cdc_acm, WebSerial bypasses
+// this). WebUSB polyfill on Android OTG (kernel doesn't pre-claim CDC there).
+const polyfillSerial = window.__webSerialPolyfill;
+const serialApi = ('serial' in navigator) ? navigator.serial : polyfillSerial;
+
+// --- WebSerial ---
+let port = null;
+let reader = null;
+let writer = null;
+let readLoopRunning = false;
+
+
+async function doDisconnect() {
+  readLoopRunning = false;
+  try { if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; } } catch {}
+  try { if (writer) { writer.releaseLock(); writer = null; } } catch {}
+  try { if (port) { await port.close(); port = null; } } catch {}
+  leds.set(radialBrightness);
+  renderAll();
+  firstTouchHandled = false; // allow next touch to reconnect
+}
+
+// --- mext send helpers ---
+async function sendBytes(bytes) {
+  if (!writer) return;
+  // Pad to 64 bytes with 0xFF
+  const buf = new Uint8Array(64).fill(0xFF);
+  buf.set(bytes);
+  console.log('TX', Array.from(bytes).map(b => '0x' + b.toString(16).padStart(2,'0')).join(' '));
+  try { await writer.write(buf); } catch (e) { await doDisconnect(); }
+}
+
+// Size response: 0x03 cols rows
+function sendSizeResponse() {
+  sendBytes([0x03, COLS, ROWS]);
+}
+
+// Capabilities response: 0x00 subsystem count  (subsystem 6 = grid, count 0)
+function sendCapsResponse() {
+  sendBytes([0x00, 0x06, 0x00]);
+}
+
+// ID response: 0x01 + 32 bytes of ASCII identifier
+function sendIdResponse() {
+  const buf = new Uint8Array(33);
+  buf[0] = 0x01;
+  const id = 'mlrws-webgrid\0';
+  for (let i = 0; i < Math.min(id.length, 32); i++) buf[1 + i] = id.charCodeAt(i);
+  sendBytes(buf);
+}
+
+// We send all three on first connect to get the firmware to recognise us,
+// but really we wait for the firmware to query and reply properly.
+function sendDiscoveryResponse() {
+  // Don't spam — just pre-send size so firmware can pick it up on first query
+  // Actual responses are sent reactively in the rx handler below.
+}
+
+// Grid key event
+function sendKey(x, y, z) {
+  // 0x21 = key down, 0x20 = key up
+  sendBytes([z ? 0x21 : 0x20, x, y]);
+}
+
+// --- mext receive parser ---
+const rxBuf = [];
+let rxExpected = 0;
+
+function mextResponseLen(header) {
+  const addr = header >> 4;
+  const cmd  = header & 0x0F;
+  switch (addr) {
+    case 0x0:
+      return 1; // all system queries from firmware are single-byte (0x00, 0x01, 0x05)
+    case 0x1: {
+      // LED commands from firmware
+      switch (cmd) {
+        case 0x2: return 1;   // 0x12 all off
+        case 0x3: return 2;   // 0x13 all level
+        case 0x4: return 11;  // 0x14 binary frame
+        case 0x5: return 4;   // 0x15 single LED
+        case 0x6: return 3;   // 0x16 row
+        case 0x7: return 2;   // 0x17 intensity
+        case 0x8: return 3;   // 0x18 col
+        case 0x9: return 3;   // 0x19 single level
+        case 0xA: return 35;  // 0x1A level map 8x8
+        case 0xB: return 19;  // 0x1B level row
+        case 0xC: return 10;  // 0x1C level col
+        default:  return 1;
+      }
+    }
+    default: return 1;
+  }
+}
+
+function dispatchMessage(buf) {
+  console.log('RX', Array.from(buf).map(b => '0x' + b.toString(16).padStart(2,'0')).join(' '));
+  const header = buf[0];
+  const addr   = header >> 4;
+  const cmd    = header & 0x0F;
+
+  if (addr === 0x0) {
+    // System messages from firmware (discovery queries)
+    switch (cmd) {
+      case 0x0: sendCapsResponse(); break;  // query caps
+      case 0x1: sendIdResponse(); break;    // query id
+      case 0x5: sendSizeResponse(); break;  // query size (0x05 = addr 0, cmd 5)
+    }
+    return;
+  }
+
+  if (addr !== 0x1) return; // only handle LED commands
+
+  switch (cmd) {
+    case 0x2: { // 0x12 all off
+      leds.fill(0);
+      renderAll();
+      break;
+    }
+    case 0x3: { // 0x13 all level
+      leds.fill(buf[1] & 0x0F);
+      renderAll();
+      break;
+    }
+    case 0x4: { // 0x14 binary frame (x_off, y_off, row0..row7)
+      const xo = buf[1];
+      const yo = buf[2];
+      for (let r = 0; r < 8; r++) {
+        const mask = buf[3 + r];
+        for (let c = 0; c < 8; c++) {
+          const x = xo + c;
+          const y = yo + r;
+          if (x < COLS && y < ROWS) {
+            leds[cellIndex(x, y)] = (mask >> c) & 1 ? 15 : 0;
+            renderCell(x, y);
+          }
+        }
+      }
+      break;
+    }
+    case 0x5: { // 0x15 single LED (x, y, s)
+      const x = buf[1]; const y = buf[2]; const s = buf[3] & 1;
+      if (x < COLS && y < ROWS) { leds[cellIndex(x, y)] = s ? 15 : 0; renderCell(x, y); }
+      break;
+    }
+    case 0x6: { // 0x16 row (x_off, y, mask)
+      const xo = buf[1]; const y = buf[2]; const mask = buf[3];
+      for (let c = 0; c < 8; c++) {
+        const x = xo + c;
+        if (x < COLS && y < ROWS) {
+          leds[cellIndex(x, y)] = (mask >> c) & 1 ? 15 : 0;
+          renderCell(x, y);
+        }
+      }
+      break;
+    }
+    case 0x7: { // 0x17 intensity
+      globalIntensity = buf[1] & 0x0F;
+      renderAll();
+      break;
+    }
+    case 0x8: { // 0x18 col (x, y_off, mask)
+      const x = buf[1]; const yo = buf[2]; const mask = buf[3];
+      for (let r = 0; r < 8; r++) {
+        const y = yo + r;
+        if (x < COLS && y < ROWS) {
+          leds[cellIndex(x, y)] = (mask >> r) & 1 ? 15 : 0;
+          renderCell(x, y);
+        }
+      }
+      break;
+    }
+    case 0x9: { // 0x19 single level (x, y, level)
+      const x = buf[1]; const y = buf[2]; const l = buf[3] & 0x0F;
+      if (x < COLS && y < ROWS) { leds[cellIndex(x, y)] = l; renderCell(x, y); }
+      break;
+    }
+    case 0xA: { // 0x1A level map 8x8 (x_off, y_off, 32 bytes)
+      const xo = buf[1];
+      const yo = buf[2];
+      let di = 3;
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c += 2) {
+          const packed = buf[di++];
+          const la = (packed >> 4) & 0x0F;
+          const lb = packed & 0x0F;
+          const x0 = xo + c; const x1 = xo + c + 1; const y = yo + r;
+          if (x0 < COLS && y < ROWS) { leds[cellIndex(x0, y)] = la; renderCell(x0, y); }
+          if (x1 < COLS && y < ROWS) { leds[cellIndex(x1, y)] = lb; renderCell(x1, y); }
+        }
+      }
+      break;
+    }
+    case 0xB: { // 0x1B level row (x_off, y, 8 levels)
+      const xo = buf[1]; const y = buf[2];
+      for (let c = 0; c < 8; c++) {
+        const x = xo + c;
+        if (x < COLS && y < ROWS) {
+          leds[cellIndex(x, y)] = buf[3 + c] & 0x0F;
+          renderCell(x, y);
+        }
+      }
+      break;
+    }
+    case 0xC: { // 0x1C level col (x, y_off, 8 levels)
+      const x = buf[1]; const yo = buf[2];
+      for (let r = 0; r < 8; r++) {
+        const y = yo + r;
+        if (x < COLS && y < ROWS) {
+          leds[cellIndex(x, y)] = buf[3 + r] & 0x0F;
+          renderCell(x, y);
+        }
+      }
+      break;
+    }
+  }
+}
+
+function rxFeed(bytes) {
+  for (const byte of bytes) {
+    if (rxExpected === 0) {
+      if (byte === 0xFF) continue; // padding
+      rxBuf.length = 0;
+      rxBuf.push(byte);
+      const len = mextResponseLen(byte);
+      if (len <= 1) {
+        dispatchMessage(rxBuf);
+        rxExpected = 0;
+      } else {
+        rxExpected = len;
+      }
+    } else {
+      rxBuf.push(byte);
+      if (rxBuf.length >= rxExpected) {
+        dispatchMessage(rxBuf);
+        rxExpected = 0;
+      }
+    }
+  }
+}
+
+async function startReadLoop() {
+  readLoopRunning = true;
+  try {
+    reader = port.readable.getReader();
+    while (readLoopRunning) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) rxFeed(value);
+    }
+  } catch (e) {
+    if (readLoopRunning) setStatus('Read error: ' + e.message, 'error');
+  } finally {
+    try { reader.releaseLock(); } catch {}
+    reader = null;
+  }
+}
+
+// --- Touch / mouse input ---
+// Track which cell each pointer is currently over
+const pointerCells = new Map(); // pointerId → {x, y}
+
+function cellFromPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  if (!el || !el.classList.contains('btn')) return null;
+  const idx = cells.indexOf(el);
+  if (idx < 0) return null;
+  return { x: idx % COLS, y: Math.floor(idx / COLS) };
+}
+
+function pressCell(x, y, pointerId) {
+  const idx = cellIndex(x, y);
+  if (pressed[idx]) return;
+  pressed[idx] = 1;
+  if (!writer) {
+    // Offline: toggle LED between off and its radial-gradient brightness
+    leds[idx] = leds[idx] ? 0 : radialBrightness[idx];
+  }
+  renderCell(x, y);
+  sendKey(x, y, 1);
+}
+
+function releaseCell(x, y) {
+  const idx = cellIndex(x, y);
+  if (!pressed[idx]) return;
+  pressed[idx] = 0;
+  renderCell(x, y);
+  sendKey(x, y, 0);
+}
+
+grid.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  onFirstTouch();
+  grid.setPointerCapture(e.pointerId);
+  const c = cellFromPoint(e.clientX, e.clientY);
+  if (!c) return;
+  pointerCells.set(e.pointerId, c);
+  pressCell(c.x, c.y, e.pointerId);
+});
+
+grid.addEventListener('pointermove', e => {
+  e.preventDefault();
+  const c = cellFromPoint(e.clientX, e.clientY);
+  const prev = pointerCells.get(e.pointerId);
+  if (!c) return;
+  if (prev && (prev.x !== c.x || prev.y !== c.y)) {
+    releaseCell(prev.x, prev.y);
+    pointerCells.set(e.pointerId, c);
+    pressCell(c.x, c.y, e.pointerId);
+  }
+});
+
+grid.addEventListener('pointerup', e => {
+  e.preventDefault();
+  const c = pointerCells.get(e.pointerId);
+  if (c) { releaseCell(c.x, c.y); pointerCells.delete(e.pointerId); }
+});
+
+grid.addEventListener('pointercancel', e => {
+  const c = pointerCells.get(e.pointerId);
+  if (c) { releaseCell(c.x, c.y); pointerCells.delete(e.pointerId); }
+});
+
+// --- Fullscreen + auto-connect on first touch ---
+let firstTouchHandled = false;
+
+async function onFirstTouch() {
+  if (firstTouchHandled) return;
+  firstTouchHandled = true;
+
+  // requestPort() must be called before any await so the browser treats it as
+  // part of this user gesture (required for both the serial picker and fullscreen).
+  let portPromise = null;
+  if (serialApi && !writer) {
+    portPromise = serialApi.requestPort();
+  }
+
+  // Now fire fullscreen (also needs the user gesture, both called before any await)
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (req) req.call(el, { navigationUI: 'hide' }).catch(() => {});
+
+  // Await the port picker result
+  if (portPromise) {
+    try {
+      port = await portPromise;
+      console.log('port selected', port);
+      await port.open({ baudRate: 115200 });
+      console.log('port opened');
+      writer = port.writable.getWriter();
+      console.log('writer ready');
+      startReadLoop();
+    } catch (e) {
+      console.error('connect failed:', e);
+      port = null;
+      firstTouchHandled = false; // picker was cancelled — allow retry on next touch
+    }
+  }
+}
+
+// Lock orientation once fullscreen (fails silently where unsupported)
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement && screen.orientation && screen.orientation.lock)
+    screen.orientation.lock('landscape').catch(() => {});
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  if (document.webkitFullscreenElement && screen.orientation && screen.orientation.lock)
+    screen.orientation.lock('landscape').catch(() => {});
+});
+
+// Precompute radial brightness — cosine falloff, brightest at centre, off at
+// corners. Used for the startup display and as the "on" level in offline toggle mode.
+const radialBrightness = new Uint8Array(COLS * ROWS);
+{
+  const cx = (COLS - 1) / 2;
+  const cy = (ROWS - 1) / 2;
+  const maxDist = Math.sqrt(cx * cx + cy * cy);
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const dx = x - cx, dy = y - cy;
+      const t = Math.sqrt(dx * dx + dy * dy) / maxDist;
+      radialBrightness[cellIndex(x, y)] = Math.round(15 * 0.5 * (1 + Math.cos(Math.PI * t)));
+    }
+  }
+}
+leds.set(radialBrightness);
+renderAll();
+</script>
+</body>
+</html>
