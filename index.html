@@ -165,7 +165,6 @@
     const gridEl = document.getElementById('virtual-grid');
     const logEl = document.getElementById('console');
 
-    // Generate 8x8 Virtual Grid UI
     for (let y = 0; y < 8; y++) {
       for (let x = 0; x < 8; x++) {
         const pad = document.createElement('div');
@@ -180,7 +179,6 @@
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // --- 1. WEB MIDI SETUP ---
     async function initMIDI() {
       try {
         midiAccess = await navigator.requestMIDIAccess({ sysex: true });
@@ -280,7 +278,6 @@
       }
     }
 
-    // --- 2. WEB SERIAL SETUP ---
     async function updateSerialDropdown() {
       if (!('serial' in navigator)) {
         log("Web Serial API is not supported in this browser.");
@@ -328,19 +325,14 @@
       try {
         serialPort = ports[idx];
         await serialPort.open({ baudRate: 115200 });
-        
-        // Assert DTR (Data Terminal Ready) so RP2040 knows a serial host is active
         await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true });
-        
         writer = serialPort.writable.getWriter();
 
         document.getElementById('serial-status').textContent = "Serial: Connected";
         document.getElementById('serial-status').classList.add('active');
         log("Workshop Computer serial port opened with DTR enabled.");
 
-        // Send Monome Handshake / Query
         sendMonomeHandshake();
-
         readSerialLoop();
       } catch (err) {
         log("Serial Connection Error: " + err.message);
@@ -349,7 +341,6 @@
 
     async function sendMonomeHandshake() {
       if (writer) {
-        // Monome Protocol: sys/info query [0x00, 0x00]
         await writer.write(new Uint8Array([0x00, 0x00]));
         log("Sent Monome System Query (Handshake).");
       }
@@ -364,7 +355,6 @@
       }
     }
 
-    // --- 3. SERIAL PARSER ---
     async function readSerialLoop() {
       let buffer = [];
       while (serialPort.readable) {
@@ -422,4 +412,4 @@
     updateSerialDropdown();
   </script>
 </body>
-</html>"""
+</html>
